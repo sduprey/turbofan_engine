@@ -1,0 +1,6 @@
+{
+  "name": "Turbofan Aeroacoustics Thesis Explorer",
+  "description": "Interactive mathematical and numerical showcase of Stefan Duprey's PhD thesis on turbofan acoustic propagation (PA2R, FEM-BEM coupling, Lorentz transform, modal duct acoustics).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
