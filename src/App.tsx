@@ -343,9 +343,10 @@ export default function App() {
       for (let x = 0; x < w; x++) {
         const idx = (y * w + x) * 4;
 
-        // Cowl body core interior check (leaves a smooth margin for sub-pixel vector anti-aliasing)
-        const isInsideCowlCore = x < ductLipX - 6 && absDy > ductR + 5 && absDy < ductR + 24;
-        if (isInsideCowlCore) {
+        // Solid aerodynamic nacelle cowl structure: from inner wall (ductR) to outer wall (ductR + 25)
+        // Closing the previous 5px margin gap completely eliminates spurious wave slivers inside metal
+        const isInsideCowlSolid = x <= ductLipX + 4 && absDy >= ductR && absDy <= ductR + 25;
+        if (isInsideCowlSolid) {
           d[idx] = 18;
           d[idx + 1] = 26;
           d[idx + 2] = 44;
@@ -382,67 +383,85 @@ export default function App() {
         // Combined C-infinity continuous Mach number field everywhere (strictly smooth, zero jumps)
         const carrierMach = Math.min(1.20, baseSpeed + venturiBoost);
 
-        // 2. Acoustic Field: Duct Mode + Physical Radiation propagating OUT of the fan
+        // 2. Aeroacoustic Wavefield: Exact physical domain formulation
+        // Zone 1: Guided Bessel duct mode (m, n) strictly confined INSIDE the intake duct (absDy <= ductR, x <= ductLipX).
+        // Zone 2: Exterior behind intake lip (absDy > ductR, x <= ductLipX): No guided mode! Radiated diffraction only.
+        // Zone 3: Forward radiating field (x > ductLipX): Continuous aperture matching with thesis directivity lobes.
         let wave = 0;
-        const isInsideDuct = x < ductLipX && absDy <= ductR;
-        const isOuterCowlShadow = x < ductLipX && absDy > ductR;
 
-        if (isInsideDuct) {
-          // Guided Waveguide Mode (m, n) strictly confined inside the duct cylinder
-          const zRel = x - ductLipX; // negative inside duct (in pixels)
-          if (modeAnalysis.isPropagative) {
-            wave = besselVal * Math.cos(betaDisp * zRel - omegaT);
-          } else {
-            // Cut-off evanescent mode: exponential spatial decay towards open lip
-            wave = besselVal * Math.exp(betaDisp * zRel) * Math.cos(omegaT);
-          }
-        } else if (!isOuterCowlShadow) {
-          // Exterior domain in front of the fan (x >= ductLipX):
-          // Acoustic waves radiate out of the fan aperture into the exterior!
+        if (x <= ductLipX && absDy <= ductR) {
+          // ZONE 1: GUIDED DUCT MODE (strictly inside duct tube)
+          // Waveguide eigenmode J_m(z_mn * r/R) * cos(beta * (x - x_lip) - omega*t)
+          const normR = absDy / ductR;
+          const ductAmp = besselJ(m, normR * zmn);
+          const ductPhase = betaDisp * (x - ductLipX) - omegaT;
+          wave = ductAmp * Math.cos(ductPhase);
+
+        } else if (x <= ductLipX && absDy > ductR) {
+          // ZONE 2: EXTERIOR BEHIND INTAKE LIP (left and above the duct)
+          // Visible weak backward-propagating diffracted acoustic wave traveling to the left:
+          const dxAft = ductLipX - x; // distance rearward of lip plane (dxAft >= 0)
+          const normR = absDy / ductR;
+
+          // Gentle radial envelope across the upper strip (visible weak wave, ~0.26 amplitude)
+          const radialEnv = Math.exp(-Math.pow((normR - 1.0) / 0.65, 1.8));
+
+          // Gentle rearward decay along the nacelle
+          const shadowDecay = Math.exp(-dxAft / (ductR * 1.6));
+
+          // Base amplitude: weak (~25% of duct mode) for clean, realistic visual contrast
+          const weakAmp = 0.28 * radialEnv * shadowDecay;
+
+          // Convective Doppler wavenumber for backward propagation along the cowl
+          const kBackward = k0Disp / (1.0 + Minf);
+
+          // Phase: constant phase dxAft = (omega*t + const)/k => travels leftward (backward)!
+          // Seamlessly matches -omegaT at dxAft = 0 (x = ductLipX)
+          const phase = kBackward * dxAft - omegaT;
+
+          wave = weakAmp * Math.cos(phase);
+
+        } else {
+          // ZONE 3: FORWARD RADIATING WAVEFIELD (x > ductLipX, exiting fan mouth into exterior)
           const dx = x - ductLipX;
-          const dist = Math.sqrt(dx * dx + dy * dy);
+          const r = Math.sqrt(dx * dx + dy * dy);
           const thetaRad = Math.atan2(absDy, Math.max(0.001, dx));
           const thetaDeg = Math.min(180, Math.max(0, Math.round((thetaRad * 180) / Math.PI)));
 
-          // Far-field directivity amplitude |A(theta)| from Thesis Chapter 5 / Page 125
+          // Directivity from Thesis Chapter 5 / Page 125 Figure 5.5.5
           const dirAmp = directivityLookup[thetaDeg] / maxDir;
 
-          // Aperture near-field matching profile (Bessel J_m mode shape at the fan face)
-          const nearAmp = absDy <= ductR ? besselVal : besselVal * Math.exp(-(absDy - ductR) / 14);
+          // Smooth Fresnel transition parameter from aperture plane to far-field
+          // xi = 0 at dx = 0 (exact aperture profile matching), xi -> 1 far ahead
+          const xi = 1 - Math.exp(-dx / (ductR * 1.25));
 
-          // Fresnel transition factor: exactly 0 at the fan face (dx=0), smoothly approaching 1 in far-field
-          const transDistance = ductR * 1.1; // ~95px smooth Fresnel zone
-          const xi = 1 - Math.exp(-dx / transDistance);
+          // Effective acoustic path: planar at mouth (dx = 0 => sPath = 0 for all y!), expanding to circular
+          // Evaluated uniformly for ALL y: mathematically guarantees ZERO horizontal line!
+          const sPath = (1 - xi) * dx + xi * r;
 
-          // Smoothly blended amplitude (C0 and C1 continuous at dx=0 with duct Bessel mode!)
+          // Smooth convective wavenumber transition
+          const dopplerK = k0Disp / Math.max(0.35, 1 - Minf * Math.cos(thetaRad));
+          const localK = (1 - xi) * betaDisp + xi * dopplerK;
+          const phase = localK * sPath - omegaT;
+
+          // Aperture near-field profile: C^1 smooth across normR = 1.0 (since J'_m(z_mn) = 0 at duct wall)
+          const normR = absDy / ductR;
+          const nearAmp = normR <= 1.0
+            ? besselJ(m, normR * zmn)
+            : besselJ(m, zmn) * Math.exp(-Math.pow((normR - 1.0) / 0.15, 2));
+
+          const spreading = 1 / Math.sqrt(1 + xi * (r / (ductR * 1.5)));
           const blendedAmp = (1 - xi) * nearAmp + xi * dirAmp;
 
-          // Geometric spreading decay (cylindrical spreading in 2D)
-          const spreading = 1 / Math.sqrt(1 + dist / (ductR * 1.5));
-
-          // Convective Doppler wave propagation in flight stream M_inf
-          const dopplerK = k0Disp / Math.max(0.35, 1 - Minf * Math.cos(thetaRad));
-
-          // Smooth wavefront curvature transition: planar at dx=0, curved in far field
-          const curvedPath = dx + xi * (dist - dx);
-          const phase = dopplerK * curvedPath - omegaT;
-
-          // Cowl shadowing behind lip angle > 90°
-          const cowlShadow = thetaRad > Math.PI * 0.5 ? Math.exp(-(thetaRad - Math.PI * 0.5) * 5.0) : 1.0;
-
-          // Propagating radiated wavefield outside the fan
-          wave = blendedAmp * spreading * cowlShadow * Math.cos(phase);
+          wave = blendedAmp * spreading * Math.cos(phase);
         }
 
         // 3. Render pixel according to selected wavefieldDisplayMode
         if (wavefieldDisplayMode === 'split') {
           // SPLIT MODE (Axisymmetric research view):
-          // Top half (dy <= 0):
-          //   - Inside duct: Guided modal propagation
-          //   - Outside duct: Wave propagating OUT of the fan into the exterior!
-          // Bottom half (dy > 0):
-          //   - Non-Linear Carrier Flow with Venturi Effect (Thesis Page 123) and lip acceleration
-          if (dy <= 0 && !isOuterCowlShadow) {
+          // Top half (dy <= 0): Acoustic field (guided duct mode inside tube, radiation in front and above)
+          // Bottom half (dy > 0): Non-Linear Carrier Flow with Venturi Effect (Thesis Page 123)
+          if (dy <= 0) {
             const { r, g, b } = getWaveColor(wave);
             d[idx] = r;
             d[idx + 1] = g;
@@ -464,35 +483,19 @@ export default function App() {
           d[idx + 3] = 255;
         } else if (wavefieldDisplayMode === 'coupled') {
           // Wave propagating in duct AND radiating out of the fan, modulated over carrier flow
-          if (!isOuterCowlShadow) {
-            const waveClr = getWaveColor(wave);
-            const flowClr = getMachColor(carrierMach);
-            d[idx] = Math.floor(waveClr.r * 0.72 + flowClr.r * 0.28);
-            d[idx + 1] = Math.floor(waveClr.g * 0.72 + flowClr.g * 0.28);
-            d[idx + 2] = Math.floor(waveClr.b * 0.72 + flowClr.b * 0.28);
-            d[idx + 3] = 255;
-          } else {
-            const { r, g, b } = getMachColor(carrierMach);
-            d[idx] = r;
-            d[idx + 1] = g;
-            d[idx + 2] = b;
-            d[idx + 3] = 255;
-          }
+          const waveClr = getWaveColor(wave);
+          const flowClr = getMachColor(carrierMach);
+          d[idx] = Math.floor(waveClr.r * 0.72 + flowClr.r * 0.28);
+          d[idx + 1] = Math.floor(waveClr.g * 0.72 + flowClr.g * 0.28);
+          d[idx + 2] = Math.floor(waveClr.b * 0.72 + flowClr.b * 0.28);
+          d[idx + 3] = 255;
         } else {
-          // 'acoustic': Full symmetric view of mode propagating in duct AND radiating out of fan
-          if (!isOuterCowlShadow) {
-            const { r, g, b } = getWaveColor(wave);
-            d[idx] = r;
-            d[idx + 1] = g;
-            d[idx + 2] = b;
-            d[idx + 3] = 255;
-          } else {
-            const { r, g, b } = getMachColor(carrierMach);
-            d[idx] = Math.floor(r * 0.30);
-            d[idx + 1] = Math.floor(g * 0.30);
-            d[idx + 2] = Math.floor(b * 0.30);
-            d[idx + 3] = 255;
-          }
+          // 'acoustic': Full symmetric view of acoustic wavefield everywhere
+          const { r, g, b } = getWaveColor(wave);
+          d[idx] = r;
+          d[idx + 1] = g;
+          d[idx + 2] = b;
+          d[idx + 3] = 255;
         }
       }
     }
@@ -715,18 +718,25 @@ export default function App() {
       const inDuct = hoverCanvasPos.x <= ductLipX && Math.abs(hoverCanvasPos.y - centerY) <= ductR;
       const isRadiatedField = hoverCanvasPos.x > ductLipX && (wavefieldDisplayMode === 'split' ? isTop : wavefieldDisplayMode === 'acoustic');
 
-      if (wavefieldDisplayMode === 'split' ? (isTop && inDuct) : (wavefieldDisplayMode === 'acoustic' && inDuct)) {
+      const isAcousticActive = wavefieldDisplayMode === 'acoustic' || (wavefieldDisplayMode === 'split' && isTop);
+
+      if (isAcousticActive && inDuct) {
         ctx.fillText(`Guided Duct Mode φ_a (${m}, ${n})`, boxX + 8, boxY + 16);
         ctx.fillStyle = '#38bdf8';
         const zR = ((hoverCanvasPos.x - ductLipX) / ductR).toFixed(2);
         const rR = (Math.abs(hoverCanvasPos.y - centerY) / ductR).toFixed(2);
         ctx.fillText(`z/R = ${zR}  r/R = ${rR}`, boxX + 8, boxY + 34);
-      } else if (isRadiatedField) {
+      } else if (isAcousticActive && hoverCanvasPos.x > ductLipX) {
         ctx.fillText(`Radiated Wave |A(θ)| (${m}, ${n})`, boxX + 8, boxY + 16);
         ctx.fillStyle = '#38bdf8';
         const angleDeg = Math.round(Math.atan2(Math.abs(hoverCanvasPos.y - centerY), Math.max(0.1, hoverCanvasPos.x - ductLipX)) * 180 / Math.PI);
         const distR = (Math.sqrt(Math.pow(hoverCanvasPos.x - ductLipX, 2) + Math.pow(hoverCanvasPos.y - centerY, 2)) / ductR).toFixed(1);
         ctx.fillText(`θ = ${angleDeg}°  R = ${distR} R`, boxX + 8, boxY + 34);
+      } else if (isAcousticActive && hoverCanvasPos.x <= ductLipX && Math.abs(hoverCanvasPos.y - centerY) > ductR) {
+        ctx.fillText(`Exterior Shadow Field (θ > 90°)`, boxX + 8, boxY + 16);
+        ctx.fillStyle = '#38bdf8';
+        const angleDeg = Math.round(Math.atan2(Math.abs(hoverCanvasPos.y - centerY), hoverCanvasPos.x - ductLipX) * 180 / Math.PI);
+        ctx.fillText(`θ = ${angleDeg}° (Acoustic Shadow)`, boxX + 8, boxY + 34);
       } else {
         ctx.fillText('Carrier Flow M_0(r,z)', boxX + 8, boxY + 16);
         ctx.fillStyle = '#f59e0b';
